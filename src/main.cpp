@@ -217,6 +217,7 @@ void connectWiFi() {
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     delay(100);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
