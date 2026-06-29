@@ -364,6 +364,11 @@ void setup() {
     ds18b20.begin();
     Serial.printf("[DS18B20] Devices found on bus: %d\n", ds18b20.getDeviceCount());
     dht.begin();
+    pinMode(19, OUTPUT);
+    digitalWrite(19, LOW);
+    // Pin 19 becomes the GND pin for the adjacent PIN_ECHO, which is 18.
+    // A voltage divider is needed here, and it is constructed of
+    // two adjacent DuPont connectors which sit on 18,19.
     pinMode(PIN_TRIG, OUTPUT);
     pinMode(PIN_ECHO, INPUT);
     digitalWrite(PIN_TRIG, LOW);
