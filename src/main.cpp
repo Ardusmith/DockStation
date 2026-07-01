@@ -244,7 +244,7 @@ void connectWiFi() {
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(topic, TOPIC_OTA_CMD) != 0) return;
 
-    StaticJsonDocument<256> doc;
+    JsonDocument doc;   // was: StaticJsonDocument<256> doc;
     if (deserializeJson(doc, payload, length) != DeserializationError::Ok) return;
 
     const char* cmd = doc["cmd"];
@@ -345,7 +345,7 @@ void readAndPublish() {
     }
 
     // ── JSON summary ─────────────────────────────────────────
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;   // was: StaticJsonDocument<128> doc;
     if (!isnan(waterTempF)) doc["watertemp"] = serialized(String(waterTempF, 2));
     if (!isnan(airTempF))   doc["airtemp"]   = serialized(String(airTempF,   2));
     if (!isnan(humidity))   doc["humidity"]  = serialized(String(humidity,   2));
