@@ -88,6 +88,8 @@
 #define DHT_TYPE        DHT22
 #define SOUND_CM_US     0.01715f
 #define CM_TO_INCH      0.393701f
+const float dockAboveSpillway  = 26.2;   // Inches, dock height above spillway level
+const float sensorAboveDock    = -8.0;   // Inches, negative = sensor sits below dock
 
 // ── Timing ───────────────────────────────────────────────────
 #define READ_INTERVAL_MS   15000UL
@@ -335,6 +337,7 @@ void readAndPublish() {
     float distCm = readUltrasonicCm();
     if (distCm > 0) {
         distInch = distCm * CM_TO_INCH;
+        distInch = dockAboveSpillway + sensorAboveDock - distInch;   // convert to spillway-relative
         publishFloat(TOPIC_LEVEL, distInch);
         Serial.printf("[HC-SR04] Level: %.2f in (%.1f cm)\n", distInch, distCm);
     } else {
