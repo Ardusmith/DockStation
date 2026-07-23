@@ -1,26 +1,34 @@
 /*
  * ============================================================
  *  Dock Station — ESP-WROOM-32
- *  Sensors : DS18B20 (water temp) · DHT22 (air temp + humidity)
- *            HC-SR04 (water level)
+ *  Sensors : DS18B20 x2 (water temp + air temp, shared OneWire bus)
+ *            XKC-KL200-2M-UART LIDAR (water level)
  *  Comms   : WiFi (native) · MQTT → 164.92.68.188:1883
  *  OTA     : GitHub Releases via HTTPUpdate (HTTPS)
  * ============================================================
  *
  *  Wiring
  *  ──────
- *  DS18B20  DATA  → GPIO 4   (+ 4.7 kΩ pull-up to 3.3 V)
- *  DHT22    DATA  → GPIO 15  (+ 10 kΩ pull-up to 3.3 V)
- *  HC-SR04  TRIG  → GPIO 5
- *  HC-SR04  ECHO  → GPIO 18  (use voltage divider — 1kΩ + 2kΩ to GND)
+ *  DS18B20 x2  DATA → GPIO 4   (shared OneWire bus + shared pull-up
+ *                                on breakout board, both probes'
+ *                                wires land in the same terminals)
+ *  LIDAR   TXD (Yellow) → GPIO 18  (ESP32 RX, via voltage divider
+ *                                    down to 3.3V — LIDAR TXD is
+ *                                    open-collector, pulled to 5V)
+ *  LIDAR   RXD (Black)  → GPIO 5   (ESP32 TX, straight 3.3V logic,
+ *                                    LIDAR RX accepts 3.3V directly)
+ *  LIDAR   VCC (Brown)  → 5V (from ESP32 expansion board)
+ *  LIDAR   GND (Blue)   → GND
+ *
+ *  Note: GPIO19-as-soft-GND trick from the old HC-SR04 wiring is
+ *  NOT used here — not needed with this connector layout.
  *
  *  MQTT Topics Published
  *  ─────────────────────
  *  home/dock/watertemp      – water temp °F         (float string, 2 dp)
  *  home/dock/airtemp        – air temp °F           (float string, 2 dp)
- *  home/dock/humidity       – relative humidity %   (float string, 2 dp)
- *  home/dock/level          – distance sensor → in  (float string, 2 dp)
- *  home/dock/data           – all four as JSON snapshot
+ *  home/dock/level          – LIDAR-derived level → in (float string, 2 dp)
+ *  home/dock/data           – all three as JSON snapshot
  *  stations/DOCK1/status    – "online" / "offline"  (retained)
  *  stations/DOCK1/version   – firmware version      (retained)
  *  stations/DOCK1/ota/status – OTA progress/result  (JSON)
@@ -55,12 +63,12 @@
 #include <ArduinoJson.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <DHT.h>
 #include "secrets.h"   // WIFI_SSID, WIFI_PASSWORD — not committed to git
+#include <esp_task_wdt.h>
 
 // ── Firmware identity ────────────────────────────────────────
 #define STATION_ID      "DOCK1"
-#define FW_VERSION      "1.0.0"
+#define FW_VERSION      "2.0.0"   // bumped: LIDAR + dual-DS18B20 rewrite
 
 // ── MQTT broker ──────────────────────────────────────────────
 #define MQTT_HOST       "164.92.68.188"
@@ -70,7 +78,6 @@
 // ── MQTT topics ──────────────────────────────────────────────
 #define TOPIC_WATER_T   "home/dock/watertemp"
 #define TOPIC_AIR_T     "home/dock/airtemp"
-#define TOPIC_HUMIDITY  "home/dock/humidity"
 #define TOPIC_LEVEL     "home/dock/level"
 #define TOPIC_DATA      "home/dock/data"
 #define TOPIC_STATUS    "stations/" STATION_ID "/status"
@@ -80,14 +87,19 @@
 
 // ── Pin assignments ──────────────────────────────────────────
 #define PIN_ONE_WIRE    4
-#define PIN_DHT         13 // 15 
-#define PIN_TRIG        5
-#define PIN_ECHO        18
+#define PIN_LIDAR_RX    18   // ESP32 RX ← LIDAR TXD (via divider)
+#define PIN_LIDAR_TX    5    // ESP32 TX → LIDAR RXD (direct 3.3V)
+#define LIDAR_BAUD      9600
+
+// ── DS18B20 probe addresses (hardcoded — bus order is not reliable) ──
+// Confirmed via ds18b20_address_scanner.ino
+DeviceAddress airProbeAddr   = { 0x28, 0x68, 0xA8, 0x81, 0xE3, 0xDF, 0x3C, 0x59 };
+DeviceAddress waterProbeAddr = { 0x28, 0x4B, 0x3F, 0xA9, 0x9E, 0x23, 0x0B, 0x2A };
+#define DS18B20_RESOLUTION_BITS 9   // whole-degree resolution, ~94ms conversion
 
 // ── Sensor config ────────────────────────────────────────────
-#define DHT_TYPE        DHT22
-#define SOUND_CM_US     0.01715f
-#define CM_TO_INCH      0.393701f
+#define MM_TO_INCH      0.0393701f
+#define LIDAR_OUT_OF_RANGE_MM 4000
 const float dockAboveSpillway  = 26.2;   // Inches, dock height above spillway level
 const float sensorAboveDock    = -8.0;   // Inches, negative = sensor sits below dock
 
@@ -95,6 +107,7 @@ const float sensorAboveDock    = -8.0;   // Inches, negative = sensor sits below
 #define READ_INTERVAL_MS   15000UL
 #define MQTT_RETRY_MS       5000UL
 #define WIFI_RETRY_MS      10000UL
+#define WDT_TIMEOUT_S 25  // bumped from 15 — covers TLS handshake latency to GitHub during OTA
 
 // ── GitHub root CA certificate ───────────────────────────────
 // DigiCert Global Root CA — used by objects.githubusercontent.com
@@ -122,9 +135,9 @@ Hmjz6A2S0LVmkf6AZr7CXL8iCFOJnbvW5ARe0EFBhYyvRMGHCQ0=
 // ── Objects ──────────────────────────────────────────────────
 OneWire           oneWire(PIN_ONE_WIRE);
 DallasTemperature ds18b20(&oneWire);
-DHT               dht(PIN_DHT, DHT_TYPE);
 WiFiClient        wifiClient;
 PubSubClient      mqtt(wifiClient);
+// HardwareSerial Serial2 is predefined on ESP32 — just call begin() with pins
 
 // ── State ────────────────────────────────────────────────────
 unsigned long lastReadMs  = 0;
@@ -134,6 +147,11 @@ bool          otaActive   = false;
 
 // ── Pending OTA URL (set in MQTT callback, executed in loop) ─
 String        pendingOtaUrl = "";
+
+// ── LIDAR state (updated asynchronously by pollLidar() in loop) ─
+byte          lidarMsgBuffer[9];
+float         lastDistanceMm     = NAN;
+unsigned long lastLidarUpdateMs  = 0;
 
 // ─────────────────────────────────────────────────────────────
 //  Helpers
@@ -148,18 +166,77 @@ void publishFloat(const char* topic, float value) {
     mqtt.publish(topic, buf);
 }
 
+void setupWatchdog() {
+    esp_task_wdt_init(WDT_TIMEOUT_S, true);
+    esp_task_wdt_add(NULL);
+}
+
+// void setupWatchdog() {
+//     esp_task_wdt_config_t wdtConfig = {
+//         .timeout_ms = WDT_TIMEOUT_S * 1000,
+//         .idle_core_mask = 0,
+//         .trigger_panic = true
+//     };
+//     esp_err_t err = esp_task_wdt_init(&wdtConfig);
+//     if (err == ESP_ERR_INVALID_STATE) {
+//         esp_task_wdt_reconfigure(&wdtConfig);  // framework already owns it — reconfigure instead
+//     }
+//     esp_task_wdt_add(NULL);
+// }
 // ─────────────────────────────────────────────────────────────
-//  HC-SR04 — returns distance cm, or -1.0 on timeout
+//  LIDAR — XKC-KL200-2M-UART
+//  Protocol bytes and checksum straight from the bench-tested
+//  LIDAR_Round sketch. Auto-mode command is sent once in setup();
+//  after that the sensor streams a 9-byte frame roughly once a
+//  second on its own, so loop() just has to catch and parse it.
 // ─────────────────────────────────────────────────────────────
-float readUltrasonicCm() {
-    digitalWrite(PIN_TRIG, LOW);
-    delayMicroseconds(2);
-    digitalWrite(PIN_TRIG, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(PIN_TRIG, LOW);
-    long duration = pulseIn(PIN_ECHO, HIGH, 30000UL);
-    if (duration == 0) return -1.0f;
-    return duration * SOUND_CM_US;
+byte lidarChecksum(byte message[]) {
+    byte checksum = 0;
+    for (int i = 0; i < 8; i++) {
+        checksum = checksum ^ message[i];
+    }
+    return checksum;
+}
+
+void initLidar() {
+    // 0 = manual query, 1 = automatic serialization (page-10 convention —
+    // confirmed correct by bench test, page-4 defaults table disagrees
+    // and is wrong)
+    byte setAutoMode[] = {0x62, 0x34, 0x09, 0xFF, 0xFF, 0x0, 0x1, 0x0, 0x0};
+    setAutoMode[8] = lidarChecksum(setAutoMode);
+
+    while (Serial2.available()) Serial2.read();   // clear any boot noise
+
+    size_t sent = Serial2.write(setAutoMode, 9);
+    Serial2.flush();
+    Serial.printf("[LIDAR] Set auto-mode bytes sent: %d\n", sent);
+    delay(150);   // one-time setup delay — let the sensor reply fully before moving on
+
+    byte ackBuf[9];
+    size_t ackLen = Serial2.readBytes(ackBuf, 9);   // blocks up to default timeout, waits for full frame
+    if (ackLen > 0) {
+        Serial.print("[LIDAR] ACK: X");
+        for (size_t j = 0; j < ackLen; j++) Serial.printf("%02X\t", ackBuf[j]);
+        Serial.printf("Xend (%d bytes)\n", ackLen);
+        if (ackLen < 9) {
+            Serial.println("[LIDAR] WARNING: incomplete ACK — possible wiring/signal issue");
+        }
+    } else {
+        Serial.println("[LIDAR] No ACK received — check wiring/power");
+    }
+}
+
+// Non-blocking — call every loop() pass. Updates lastDistanceMm
+// whenever a complete 9-byte frame has arrived.
+void pollLidar() {
+    if (Serial2.available() >= 9) {
+        size_t bytesReceived = Serial2.readBytes(lidarMsgBuffer, 9);
+        if (bytesReceived == 9) {
+            int distance = lidarMsgBuffer[5] * 256 + lidarMsgBuffer[6];
+            lastDistanceMm    = (float)distance;
+            lastLidarUpdateMs = millis();
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -244,7 +321,7 @@ void connectWiFi() {
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(topic, TOPIC_OTA_CMD) != 0) return;
 
-    JsonDocument doc;   // was: StaticJsonDocument<256> doc;
+    JsonDocument doc;
     if (deserializeJson(doc, payload, length) != DeserializationError::Ok) return;
 
     const char* cmd = doc["cmd"];
@@ -302,53 +379,48 @@ void connectMQTT() {
 // ─────────────────────────────────────────────────────────────
 void readAndPublish() {
     float waterTempF = NAN;
-    // float waterTempC = NAN;
     float airTempF   = NAN;
-    float humidity   = NAN;
     float distInch   = NAN;
 
-    // ── DS18B20 water temp ────────────────────────────────────
-    ds18b20.requestTemperatures();
-    float waterTempC = ds18b20.getTempCByIndex(0);
-    Serial.printf("[DS18B20] Raw temp C: %.4f\n", waterTempC);
-    Serial.printf("[DS18B20] Device count: %d\n", ds18b20.getDeviceCount());
+    // ── DS18B20 water + air temp ──────────────────────────────
+    ds18b20.requestTemperatures();   // broadcasts to both probes on the bus at once
+
+    float waterTempC = ds18b20.getTempC(waterProbeAddr);
     if (waterTempC != DEVICE_DISCONNECTED_C) {
         waterTempF = (waterTempC * 9.0f / 5.0f) + 32.0f;
         publishFloat(TOPIC_WATER_T, waterTempF);
         Serial.printf("[DS18B20] Water: %.2f °F\n", waterTempF);
     } else {
-        Serial.println("[DS18B20] Sensor error / disconnected");
+        Serial.println("[DS18B20] Water probe error / disconnected");
     }
 
-    // ── DHT22 air temp + humidity ─────────────────────────────
-    float airTempC = dht.readTemperature();
-    humidity       = dht.readHumidity();
-    Serial.printf("[DHT22] Raw tempC: %.4f  Raw humidity: %.4f\n", airTempC, humidity);
-    if (!isnan(airTempC) && !isnan(humidity)) {
+    float airTempC = ds18b20.getTempC(airProbeAddr);
+    if (airTempC != DEVICE_DISCONNECTED_C) {
         airTempF = (airTempC * 9.0f / 5.0f) + 32.0f;
-        publishFloat(TOPIC_AIR_T,    airTempF);
-        publishFloat(TOPIC_HUMIDITY, humidity);
-        Serial.printf("[DHT22]   Air: %.2f °F  Humidity: %.1f%%\n", airTempF, humidity);
+        publishFloat(TOPIC_AIR_T, airTempF);
+        Serial.printf("[DS18B20] Air: %.2f °F\n", airTempF);
     } else {
-        Serial.println("[DHT22] Read failed");
+        Serial.println("[DS18B20] Air probe error / disconnected");
     }
 
-    // ── HC-SR04 water level ──────────────────────────────────
-    float distCm = readUltrasonicCm();
-    if (distCm > 0) {
-        distInch = distCm * CM_TO_INCH;
+    // ── LIDAR water level ─────────────────────────────────────
+    // Uses whatever pollLidar() last cached — LIDAR streams on its
+    // own schedule (~1/sec), this just reads the latest value.
+    if (!isnan(lastDistanceMm) && lastDistanceMm < LIDAR_OUT_OF_RANGE_MM) {
+        distInch = lastDistanceMm * MM_TO_INCH;
         distInch = dockAboveSpillway + sensorAboveDock - distInch;   // convert to spillway-relative
         publishFloat(TOPIC_LEVEL, distInch);
-        Serial.printf("[HC-SR04] Level: %.2f in (%.1f cm)\n", distInch, distCm);
+        Serial.printf("[LIDAR] Level: %.2f in (%.0f mm)\n", distInch, lastDistanceMm);
+    } else if (isnan(lastDistanceMm)) {
+        Serial.println("[LIDAR] No data received yet");
     } else {
-        Serial.println("[HC-SR04] Echo timeout");
+        Serial.println("[LIDAR] Out of range");
     }
 
     // ── JSON summary ─────────────────────────────────────────
-    JsonDocument doc;   // was: StaticJsonDocument<128> doc;
+    JsonDocument doc;
     if (!isnan(waterTempF)) doc["watertemp"] = serialized(String(waterTempF, 2));
     if (!isnan(airTempF))   doc["airtemp"]   = serialized(String(airTempF,   2));
-    if (!isnan(humidity))   doc["humidity"]  = serialized(String(humidity,   2));
     if (!isnan(distInch))   doc["level"]     = serialized(String(distInch,   2));
 
     char jsonBuf[128];
@@ -362,20 +434,17 @@ void readAndPublish() {
 // ─────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    setupWatchdog();
     delay(1000);
     Serial.println("\n=== Dock Station " STATION_ID " — FW " FW_VERSION " ===");
 
     ds18b20.begin();
     Serial.printf("[DS18B20] Devices found on bus: %d\n", ds18b20.getDeviceCount());
-    dht.begin();
-    pinMode(19, OUTPUT);
-    digitalWrite(19, LOW);
-    // Pin 19 becomes the GND pin for the adjacent PIN_ECHO, which is 18.
-    // A voltage divider is needed here, and it is constructed of
-    // two adjacent DuPont connectors which sit on 18,19.
-    pinMode(PIN_TRIG, OUTPUT);
-    pinMode(PIN_ECHO, INPUT);
-    digitalWrite(PIN_TRIG, LOW);
+    ds18b20.setResolution(waterProbeAddr, DS18B20_RESOLUTION_BITS);
+    ds18b20.setResolution(airProbeAddr,   DS18B20_RESOLUTION_BITS);
+
+    Serial2.begin(LIDAR_BAUD, SERIAL_8N1, PIN_LIDAR_RX, PIN_LIDAR_TX);
+    initLidar();
 
     connectWiFi();
 
@@ -389,6 +458,18 @@ void setup() {
 //  loop()
 // ─────────────────────────────────────────────────────────────
 void loop() {
+    esp_task_wdt_reset();
+    pollLidar();   // non-blocking — catch any streamed LIDAR frame every pass
+//  // TEMP TEST — remove after confirming reset
+//     static bool tested = false;
+//     if (!tested && millis() > 30000) {  // wait 30s so you see normal operation first
+//         tested = true;
+//         Serial.println("[TEST] Forcing WDT timeout...");
+//         delay(WDT_TIMEOUT_S * 1000 + 2000);  // sit past the timeout
+//     }
+
+//     //end of temporary test
+    
     if (pendingOtaUrl.length() > 0) {
         String url = pendingOtaUrl;
         pendingOtaUrl = "";
