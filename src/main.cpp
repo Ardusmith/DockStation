@@ -70,6 +70,12 @@
 #define STATION_ID      "DOCK1"
 #define FW_VERSION      "2.0.0"   // bumped: LIDAR + dual-DS18B20 rewrite
 
+// ── TEMP: enclosure WiFi/MQTT range test ───────────────────────
+// Publishes fixed, obviously-fake values instead of real sensor
+// reads. No sensors need to be connected. REMOVE / comment out
+// before returning this station to real service.
+#define FAKE_DATA_TEST
+
 // ── MQTT broker ──────────────────────────────────────────────
 #define MQTT_HOST       "164.92.68.188"
 #define MQTT_PORT       1883
@@ -371,13 +377,38 @@ void connectMQTT() {
     } else {
         Serial.print(" failed, rc=");
         Serial.println(mqtt.state());
-    }
+   } 
 }
 
 // ─────────────────────────────────────────────────────────────
 //  Read & publish all sensors
 // ─────────────────────────────────────────────────────────────
 void readAndPublish() {
+#ifdef FAKE_DATA_TEST
+    // Enclosure range test — no sensors attached, publish fixed
+    // bogus values so consistent MQTT delivery can be confirmed
+    // with the lid on and screwed shut.
+    float waterTempF = 50.0f;
+    float airTempF   = 60.0f;
+    float distInch   = 10.0f;
+
+    publishFloat(TOPIC_WATER_T, waterTempF);
+    publishFloat(TOPIC_AIR_T,   airTempF);
+    publishFloat(TOPIC_LEVEL,   distInch);
+    Serial.printf("[FAKE] water=%.2f air=%.2f level=%.2f\n",
+                  waterTempF, airTempF, distInch);
+
+    JsonDocument doc;
+    doc["watertemp"] = serialized(String(waterTempF, 2));
+    doc["airtemp"]   = serialized(String(airTempF,   2));
+    doc["level"]     = serialized(String(distInch,   2));
+
+    char jsonBuf[128];
+    serializeJson(doc, jsonBuf, sizeof(jsonBuf));
+    mqtt.publish(TOPIC_DATA, jsonBuf);
+    Serial.printf("[FAKE JSON] %s\n", jsonBuf);
+
+#else
     float waterTempF = NAN;
     float airTempF   = NAN;
     float distInch   = NAN;
@@ -427,6 +458,7 @@ void readAndPublish() {
     serializeJson(doc, jsonBuf, sizeof(jsonBuf));
     mqtt.publish(TOPIC_DATA, jsonBuf);
     Serial.printf("[JSON]    %s\n", jsonBuf);
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────
