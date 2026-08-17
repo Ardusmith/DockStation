@@ -100,15 +100,19 @@ DeviceAddress waterProbeAddr = { 0x28, 0x4B, 0x3F, 0xA9, 0x9E, 0x23, 0x0B, 0x2A 
 // ── Sensor config ────────────────────────────────────────────
 #define MM_TO_INCH      0.0393701f
 #define LIDAR_OUT_OF_RANGE_MM 4000
+#define LIDAR_START_BYTE 0x62
+
 const float dockAboveSpillway  = 26.2;   // Inches, dock height above spillway level
 const float sensorAboveDock    = -8.0;   // Inches, negative = sensor sits below dock
 
 // ── Timing ───────────────────────────────────────────────────
 #define READ_INTERVAL_MS   1800000UL   // 30 min — temp/level don't need finer resolution;
                                         // see 2"/hr-rain-event math from project chat
+// #define READ_INTERVAL_MS 15000UL   // TEMP: 15s for LIDAR debug — revert to 1800000UL (30min) when done
 #define MQTT_RETRY_MS       5000UL
 #define WIFI_RETRY_MS      10000UL
 #define WDT_TIMEOUT_S 25  // bumped from 15 — covers TLS handshake latency to GitHub during OTA
+bool firstReadDone = false;   // forces an immediate read/publish on boot
 
 // ── GitHub root CA certificate ───────────────────────────────
 // DigiCert Global Root CA — used by objects.githubusercontent.com
@@ -227,16 +231,33 @@ void initLidar() {
     }
 }
 
+
 // Non-blocking — call every loop() pass. Updates lastDistanceMm
-// whenever a complete 9-byte frame has arrived.
+// whenever a complete, validated 9-byte frame has arrived.
+// Rejects frames with a bad start byte or failed checksum, and
+// resyncs by discarding one byte at a time rather than trusting
+// whatever 9 bytes happen to be at the front of the buffer.
 void pollLidar() {
-    if (Serial2.available() >= 9) {
-        size_t bytesReceived = Serial2.readBytes(lidarMsgBuffer, 9);
-        if (bytesReceived == 9) {
-            int distance = lidarMsgBuffer[5] * 256 + lidarMsgBuffer[6];
-            lastDistanceMm    = (float)distance;
-            lastLidarUpdateMs = millis();
+    while (Serial2.available() >= 9) {
+        if (Serial2.peek() != LIDAR_START_BYTE) {
+            Serial2.read();           // discard one byte, try to resync
+            continue;
         }
+
+        size_t bytesReceived = Serial2.readBytes(lidarMsgBuffer, 9);
+        if (bytesReceived != 9) break;   // shouldn't happen given available() check, but be safe
+
+        byte checksum = 0;
+        for (int i = 0; i < 8; i++) checksum ^= lidarMsgBuffer[i];
+
+        if (checksum != lidarMsgBuffer[8]) {
+            Serial.println("[LIDAR] Bad checksum — frame discarded");
+            continue;   // buffer already advanced past this bad frame; loop checks for more
+        }
+
+        int distance = lidarMsgBuffer[5] * 256 + lidarMsgBuffer[6];
+        lastDistanceMm    = (float)distance;
+        lastLidarUpdateMs = millis();
     }
 }
 
@@ -488,8 +509,9 @@ void loop() {
     mqtt.loop();
 
     unsigned long now = millis();
-    if (now - lastReadMs >= READ_INTERVAL_MS) {
+    if (!firstReadDone || (now - lastReadMs >= READ_INTERVAL_MS)) {
         lastReadMs = now;
+        firstReadDone = true;
         if (mqtt.connected()) readAndPublish();
     }
 }
