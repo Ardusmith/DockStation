@@ -12,6 +12,10 @@
  *  DS18B20 x2  DATA → GPIO 4   (shared OneWire bus + shared pull-up
  *                                on breakout board, both probes'
  *                                wires land in the same terminals)
+ *                     9/3/26   After much debugging, it was determined
+ *                                that GPIO4 was fried. We swapped to GPIO13
+ *                                and all OneWire sensors worked fine.
+ * 
  *  LIDAR   TXD (Yellow) → GPIO 18  (ESP32 RX, via voltage divider
  *                                    down to 3.3V — LIDAR TXD is
  *                                    open-collector, pulled to 5V)
@@ -68,7 +72,9 @@
 
 // ── Firmware identity ────────────────────────────────────────
 #define STATION_ID      "DOCK1"
-#define FW_VERSION      "2.0.0"   // bumped: LIDAR + dual-DS18B20 rewrite
+//#define FW_VERSION      "2.0.0"   // bumped: LIDAR + dual-DS18B20 rewrite
+#define FW_VERSION      "2.0.1"   // bumped: spillway/sensor calibration update
+
 
 // ── MQTT broker ──────────────────────────────────────────────
 #define MQTT_HOST       "164.92.68.188"
@@ -86,7 +92,7 @@
 #define TOPIC_OTA_STAT  "stations/" STATION_ID "/ota/status"
 
 // ── Pin assignments ──────────────────────────────────────────
-#define PIN_ONE_WIRE    4
+#define PIN_ONE_WIRE    13 //4
 #define PIN_LIDAR_RX    18   // ESP32 RX ← LIDAR TXD (via divider)
 #define PIN_LIDAR_TX    5    // ESP32 TX → LIDAR RXD (direct 3.3V)
 #define LIDAR_BAUD      9600
@@ -102,8 +108,8 @@ DeviceAddress waterProbeAddr = { 0x28, 0x4B, 0x3F, 0xA9, 0x9E, 0x23, 0x0B, 0x2A 
 #define LIDAR_OUT_OF_RANGE_MM 4000
 #define LIDAR_START_BYTE 0x62
 
-const float dockAboveSpillway  = 26.2;   // Inches, dock height above spillway level
-const float sensorAboveDock    = -8.0;   // Inches, negative = sensor sits below dock
+const float dockAboveSpillway  = 25.637;   // Inches, dock height above spillway level (was 26.2 — re-measured 2026-08-21)
+const float sensorAboveDock    = -6.0;     // Inches, negative = sensor sits below dock (was -8.0 — re-measured 2026-08-21)
 
 // ── Timing ───────────────────────────────────────────────────
 #define READ_INTERVAL_MS   1800000UL   // 30 min — temp/level don't need finer resolution;
@@ -188,6 +194,7 @@ void setupWatchdog() {
 //     }
 //     esp_task_wdt_add(NULL);
 // }
+
 // ─────────────────────────────────────────────────────────────
 //  LIDAR — XKC-KL200-2M-UART
 //  Protocol bytes and checksum straight from the bench-tested
@@ -195,6 +202,7 @@ void setupWatchdog() {
 //  after that the sensor streams a 9-byte frame roughly once a
 //  second on its own, so loop() just has to catch and parse it.
 // ─────────────────────────────────────────────────────────────
+
 byte lidarChecksum(byte message[]) {
     byte checksum = 0;
     for (int i = 0; i < 8; i++) {
