@@ -293,6 +293,8 @@ void performOtaUpdate(const String& url) {
     WiFiClientSecure secureClient;
     secureClient.setCACert(GITHUB_ROOT_CA);
 
+    httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
     httpUpdate.onProgress([](int cur, int total) {
         static int lastPct = -1;
         int pct = (total > 0) ? (cur * 100 / total) : 0;
@@ -305,11 +307,14 @@ void performOtaUpdate(const String& url) {
     t_httpUpdate_return result = httpUpdate.update(secureClient, url);
 
     switch (result) {
-        case HTTP_UPDATE_FAILED:
-            Serial.printf("[OTA] Failed: %s\n", httpUpdate.getLastErrorString().c_str());
-            publishStr(TOPIC_OTA_STAT, "{\"status\":\"failed\"}");
+        case HTTP_UPDATE_FAILED: { // note: braces needed for local variable scope.
+            String err = httpUpdate.getLastErrorString();
+            Serial.printf("[OTA] Failed: %s\n", err.c_str());
+            String payload = "{\"status\":\"failed\",\"error\":\"" + err + "\"}";
+            publishStr(TOPIC_OTA_STAT, payload.c_str());
             otaActive = false;
             break;
+        }
         case HTTP_UPDATE_NO_UPDATES:
             Serial.println("[OTA] No update available");
             publishStr(TOPIC_OTA_STAT, "{\"status\":\"no_update\"}");
