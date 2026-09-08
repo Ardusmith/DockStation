@@ -73,7 +73,8 @@
 // ── Firmware identity ────────────────────────────────────────
 #define STATION_ID      "DOCK1"
 //#define FW_VERSION      "2.0.0"   // bumped: LIDAR + dual-DS18B20 rewrite
-#define FW_VERSION      "2.0.1"   // bumped: spillway/sensor calibration update
+//#define FW_VERSION      "2.0.1"   // bumped: spillway/sensor calibration update
+#define FW_VERSION      "2.0.2"   // bumped: 9/8/26 new CA certificate.
 
 
 // ── MQTT broker ──────────────────────────────────────────────
