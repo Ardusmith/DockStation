@@ -69,12 +69,16 @@
 #include <DallasTemperature.h>
 #include "secrets.h"   // WIFI_SSID, WIFI_PASSWORD — not committed to git
 #include <esp_task_wdt.h>
+#include "esp_crt_bundle.h"
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start"); // added this to replace fixed CA.
 
 // ── Firmware identity ────────────────────────────────────────
 #define STATION_ID      "DOCK1"
 //#define FW_VERSION      "2.0.0"   // bumped: LIDAR + dual-DS18B20 rewrite
 //#define FW_VERSION      "2.0.1"   // bumped: spillway/sensor calibration update
-#define FW_VERSION      "2.0.2"   // bumped: 9/8/26 new CA certificate.
+//#define FW_VERSION      "2.0.2"   // bumped: 9/8/26 new CA certificate.
+//#define FW_VERSION      "2.0.3"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
+#define FW_VERSION      "2.0.4"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
 
 
 // ── MQTT broker ──────────────────────────────────────────────
@@ -121,37 +125,6 @@ const float sensorAboveDock    = -6.0;     // Inches, negative = sensor sits bel
 #define WDT_TIMEOUT_S 25  // bumped from 15 — covers TLS handshake latency to GitHub during OTA
 bool firstReadDone = false;   // forces an immediate read/publish on boot
 
-// ── GitHub root CA certificate ───────────────────────────────
-// DigiCert Global Root G2 — used by objects.githubusercontent.com
-// (rotated from Root CA (G1) to Root G2 as of this update — 2026-09)
-// To update: openssl s_client -connect objects.githubusercontent.com:443
-//            -showcerts 2>/dev/null | openssl x509 -noout -text
-// Expires: 2038-01-15
-static const char GITHUB_ROOT_CA[] PROGMEM = R"EOF(
------BEGIN CERTIFICATE-----
-MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
-MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
-d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
-MjAeFw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVT
-MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
-b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEcyMIIBIjANBgkqhkiG
-9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuzfNNNx7a8myaJCtSnX/RrohCgiN9RlUyfuI
-2/Ou8jqJkTx65qsGGmvPrC3oXgkkRLpimn7Wo6h+4FR1IAWsULecYxpsMNzaHxmx
-1x7e/dfgy5SDN67sH0NO3Xss0r0upS/kqbitOtSZpLYl6ZtrAGCSYP9PIUkY92eQ
-q2EGnI/yuum06ZIya7XzV+hdG82MHauVBJVJ8zUtluNJbd134/tJS7SsVQepj5Wz
-tCO7TG1F8PapspUwtP1MVYwnSlcUfIKdzXOS0xZKBgyMUNGPHgm+F6HmIcr9g+UQ
-vIOlCsRnKPZzFBQ9RnbDhxSJITRNrw9FDKZJobq7nMWxM4MphQIDAQABo0IwQDAP
-BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4EFgQUTiJUIBiV
-5uNu5g/6+rkS7QYXjzkwDQYJKoZIhvcNAQELBQADggEBAGBnKJRvDkhj6zHd6mcY
-1Yl9PMWLSn/pvtsrF9+wX3N3KjITOYFnQoQj8kVnNeyIv/iPsGEMNKSuIEyExtv4
-NeF22d+mQrvHRAiGfzZ0JFrabA0UWTW98kndth/Jsw1HKj2ZL7tcu7XUIOGZX1NG
-Fdtom/DzMNU+MeKNhJ7jitralj41E6Vf8PlwUHBHQRFXGU7Aj64GxJUTFy8bJZ91
-8rGOmaFvE7FBcf6IKshPECBV1/MUReXgRPTqh5Uykw7+U0b6LJ3/iyK5S9kJRaTe
-pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl
-MrY=
------END CERTIFICATE-----
-)EOF";
-// this is the end of the new CA block, updated 2026-09-15 — if it ever expires, update GITHUB_ROOT_CA with the new DigiCert cert
 
 // ── Objects ──────────────────────────────────────────────────
 OneWire           oneWire(PIN_ONE_WIRE);
@@ -283,6 +256,7 @@ void pollLidar() {
 //  GitHub OTA update
 //  Called from loop() so MQTT callback stays non-blocking
 // ─────────────────────────────────────────────────────────────
+//new
 void performOtaUpdate(const String& url) {
     otaActive = true;
     Serial.println("[OTA] Starting GitHub update...");
@@ -292,7 +266,7 @@ void performOtaUpdate(const String& url) {
     mqtt.loop();
 
     WiFiClientSecure secureClient;
-    secureClient.setCACert(GITHUB_ROOT_CA);
+    secureClient.setCACertBundle(rootca_crt_bundle_start);   // was: setCACert(GITHUB_ROOT_CA)
 
     httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -308,7 +282,7 @@ void performOtaUpdate(const String& url) {
     t_httpUpdate_return result = httpUpdate.update(secureClient, url);
 
     switch (result) {
-        case HTTP_UPDATE_FAILED: { // note: braces needed for local variable scope.
+        case HTTP_UPDATE_FAILED: {
             String err = httpUpdate.getLastErrorString();
             Serial.printf("[OTA] Failed: %s\n", err.c_str());
             String payload = "{\"status\":\"failed\",\"error\":\"" + err + "\"}";
@@ -326,7 +300,7 @@ void performOtaUpdate(const String& url) {
             break;
     }
 }
-
+//new
 // ─────────────────────────────────────────────────────────────
 //  WiFi
 // ─────────────────────────────────────────────────────────────
