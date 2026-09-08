@@ -80,7 +80,8 @@ extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_star
 //#define FW_VERSION      "2.0.3"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
 //#define FW_VERSION      "2.0.4"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
 //#define FW_VERSION      "2.0.5"   // bumped: 9/8/26 added a one-time function to read settings: readLidarSettings().
-#define FW_VERSION      "2.0.6"   // bumped: 9/8/26 fixed readLidarSettings to capture text only.
+//#define FW_VERSION      "2.0.6"   // bumped: 9/8/26 fixed readLidarSettings to capture text only.
+#define FW_VERSION      "2.1.0"   // bumped: 9/8/26 removed readLidarSettings.
 
 
 // ── MQTT broker ──────────────────────────────────────────────
@@ -223,35 +224,6 @@ void initLidar() {
         Serial.println("[LIDAR] No ACK received — check wiring/power");
     }
 }
-
-//temporary function to read settings.
-void readLidarSettings() {
-    byte cmdString[] = {0x64, 0x31, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
-    cmdString[8] = lidarChecksum(cmdString);
-
-    while (Serial2.available()) Serial2.read();
-
-    Serial2.write(cmdString, 9);
-    Serial2.flush();
-
-    Serial.println("[LIDAR SETTINGS] --- Full config dump (cmd 0x64) ---");
-    char dumpBuf[512];
-    size_t total = 0;
-    unsigned long lastByteMs = millis();
-
-    // Keep reading until no new byte has arrived for 300ms (stream is done)
-    while (millis() - lastByteMs < 300 && total < sizeof(dumpBuf) - 1) {
-        if (Serial2.available()) {
-            dumpBuf[total++] = Serial2.read();
-            lastByteMs = millis();
-        }
-    }
-    dumpBuf[total] = '\0';
-
-    Serial.printf("[LIDAR SETTINGS] %d bytes total\n", total);
-    Serial.println(dumpBuf);   // print as raw text — should read like a real config file
-}
-//end of temporary function.
 
 // Non-blocking — call every loop() pass. Updates lastDistanceMm
 // whenever a complete, validated 9-byte frame has arrived.
@@ -494,7 +466,6 @@ void setup() {
 
     Serial2.begin(LIDAR_BAUD, SERIAL_8N1, PIN_LIDAR_RX, PIN_LIDAR_TX);
     initLidar();
-    readLidarSettings(); //delete this after using it.
     connectWiFi();
 
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
