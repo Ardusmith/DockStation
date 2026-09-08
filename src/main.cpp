@@ -81,7 +81,8 @@ extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_star
 //#define FW_VERSION      "2.0.4"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
 //#define FW_VERSION      "2.0.5"   // bumped: 9/8/26 added a one-time function to read settings: readLidarSettings().
 //#define FW_VERSION      "2.0.6"   // bumped: 9/8/26 fixed readLidarSettings to capture text only.
-#define FW_VERSION      "2.1.0"   // bumped: 9/8/26 removed readLidarSettings.
+//#define FW_VERSION      "2.1.0"   // bumped: 9/8/26 removed readLidarSettings.
+#define FW_VERSION      "2.1.1"   // bumped: 9/8/26 added watchdog reset in the httpupdate().
 
 
 // ── MQTT broker ──────────────────────────────────────────────
@@ -281,7 +282,7 @@ void performOtaUpdate(const String& url) {
             lastPct = pct;
         }
     });
-    
+
     t_httpUpdate_return result = httpUpdate.update(secureClient, url);
 
     switch (result) {
