@@ -79,7 +79,8 @@ extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_star
 //#define FW_VERSION      "2.0.2"   // bumped: 9/8/26 new CA certificate.
 //#define FW_VERSION      "2.0.3"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
 //#define FW_VERSION      "2.0.4"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
-#define FW_VERSION      "2.0.5"   // bumped: 9/8/26 added a one-time function to read settings: readLidarSettings().
+//#define FW_VERSION      "2.0.5"   // bumped: 9/8/26 added a one-time function to read settings: readLidarSettings().
+#define FW_VERSION      "2.0.6"   // bumped: 9/8/26 fixed readLidarSettings to capture text only.
 
 
 // ── MQTT broker ──────────────────────────────────────────────
@@ -225,50 +226,30 @@ void initLidar() {
 
 //temporary function to read settings.
 void readLidarSettings() {
-    // Command 1: string-format config reply
     byte cmdString[] = {0x64, 0x31, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
     cmdString[8] = lidarChecksum(cmdString);
 
-    while (Serial2.available()) Serial2.read();   // clear any noise
+    while (Serial2.available()) Serial2.read();
 
     Serial2.write(cmdString, 9);
     Serial2.flush();
-    delay(150);
 
-    Serial.println("[LIDAR SETTINGS] --- String reply (cmd 0x64) ---");
-    byte strBuf[64];   // string reply length unconfirmed — buffer generously, print whatever arrives
-    size_t strLen = Serial2.readBytes(strBuf, sizeof(strBuf));
-    Serial.printf("[LIDAR SETTINGS] %d bytes received: ", strLen);
-    for (size_t i = 0; i < strLen; i++) Serial.printf("%02X ", strBuf[i]);
-    Serial.println();
-    Serial.print("[LIDAR SETTINGS] As ASCII: ");
-    for (size_t i = 0; i < strLen; i++) {
-        char c = strBuf[i];
-        Serial.print((c >= 32 && c <= 126) ? c : '.');
+    Serial.println("[LIDAR SETTINGS] --- Full config dump (cmd 0x64) ---");
+    char dumpBuf[512];
+    size_t total = 0;
+    unsigned long lastByteMs = millis();
+
+    // Keep reading until no new byte has arrived for 300ms (stream is done)
+    while (millis() - lastByteMs < 300 && total < sizeof(dumpBuf) - 1) {
+        if (Serial2.available()) {
+            dumpBuf[total++] = Serial2.read();
+            lastByteMs = millis();
+        }
     }
-    Serial.println();
+    dumpBuf[total] = '\0';
 
-    delay(200);
-    while (Serial2.available()) Serial2.read();   // clear before second command
-
-    // Command 2: 29-byte hex config reply
-    byte cmdHex[] = {0x62, 0x31, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
-    cmdHex[8] = lidarChecksum(cmdHex);
-
-    Serial2.write(cmdHex, 9);
-    Serial2.flush();
-    delay(150);
-
-    Serial.println("[LIDAR SETTINGS] --- Hex reply (cmd 0x62) ---");
-    byte hexBuf[29];
-    size_t hexLen = Serial2.readBytes(hexBuf, 29);
-    Serial.printf("[LIDAR SETTINGS] %d of 29 bytes received: ", hexLen);
-    for (size_t i = 0; i < hexLen; i++) Serial.printf("%02X ", hexBuf[i]);
-    Serial.println();
-    if (hexLen >= 19) {
-        Serial.printf("[LIDAR SETTINGS] Byte 18 (upload interval): %d -> %dms\n",
-                       hexBuf[18], hexBuf[18] * 100);
-    }
+    Serial.printf("[LIDAR SETTINGS] %d bytes total\n", total);
+    Serial.println(dumpBuf);   // print as raw text — should read like a real config file
 }
 //end of temporary function.
 
