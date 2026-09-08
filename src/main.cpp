@@ -273,6 +273,7 @@ void performOtaUpdate(const String& url) {
     httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
     httpUpdate.onProgress([](int cur, int total) {
+        esp_task_wdt_reset();   // feed the watchdog on every progress callback
         static int lastPct = -1;
         int pct = (total > 0) ? (cur * 100 / total) : 0;
         if (pct != lastPct && pct % 10 == 0) {
@@ -280,7 +281,7 @@ void performOtaUpdate(const String& url) {
             lastPct = pct;
         }
     });
-
+    
     t_httpUpdate_return result = httpUpdate.update(secureClient, url);
 
     switch (result) {
@@ -472,6 +473,7 @@ void setup() {
     mqtt.setCallback(mqttCallback);
     mqtt.setBufferSize(512);
     connectMQTT();
+    readAndPublish();   // immediate data point on every boot — confirms reboot happened
 }
 
 // ─────────────────────────────────────────────────────────────
