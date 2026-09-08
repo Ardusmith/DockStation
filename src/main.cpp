@@ -78,7 +78,8 @@ extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_star
 //#define FW_VERSION      "2.0.1"   // bumped: spillway/sensor calibration update
 //#define FW_VERSION      "2.0.2"   // bumped: 9/8/26 new CA certificate.
 //#define FW_VERSION      "2.0.3"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
-#define FW_VERSION      "2.0.4"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
+//#define FW_VERSION      "2.0.4"   // bumped: 9/8/26 deleted CA, replaced with 'rootca_crt_bundle_start'.
+#define FW_VERSION      "2.0.5"   // bumped: 9/8/26 added a one-time function to read settings: readLidarSettings().
 
 
 // ── MQTT broker ──────────────────────────────────────────────
@@ -222,6 +223,54 @@ void initLidar() {
     }
 }
 
+//temporary function to read settings.
+void readLidarSettings() {
+    // Command 1: string-format config reply
+    byte cmdString[] = {0x64, 0x31, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
+    cmdString[8] = lidarChecksum(cmdString);
+
+    while (Serial2.available()) Serial2.read();   // clear any noise
+
+    Serial2.write(cmdString, 9);
+    Serial2.flush();
+    delay(150);
+
+    Serial.println("[LIDAR SETTINGS] --- String reply (cmd 0x64) ---");
+    byte strBuf[64];   // string reply length unconfirmed — buffer generously, print whatever arrives
+    size_t strLen = Serial2.readBytes(strBuf, sizeof(strBuf));
+    Serial.printf("[LIDAR SETTINGS] %d bytes received: ", strLen);
+    for (size_t i = 0; i < strLen; i++) Serial.printf("%02X ", strBuf[i]);
+    Serial.println();
+    Serial.print("[LIDAR SETTINGS] As ASCII: ");
+    for (size_t i = 0; i < strLen; i++) {
+        char c = strBuf[i];
+        Serial.print((c >= 32 && c <= 126) ? c : '.');
+    }
+    Serial.println();
+
+    delay(200);
+    while (Serial2.available()) Serial2.read();   // clear before second command
+
+    // Command 2: 29-byte hex config reply
+    byte cmdHex[] = {0x62, 0x31, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
+    cmdHex[8] = lidarChecksum(cmdHex);
+
+    Serial2.write(cmdHex, 9);
+    Serial2.flush();
+    delay(150);
+
+    Serial.println("[LIDAR SETTINGS] --- Hex reply (cmd 0x62) ---");
+    byte hexBuf[29];
+    size_t hexLen = Serial2.readBytes(hexBuf, 29);
+    Serial.printf("[LIDAR SETTINGS] %d of 29 bytes received: ", hexLen);
+    for (size_t i = 0; i < hexLen; i++) Serial.printf("%02X ", hexBuf[i]);
+    Serial.println();
+    if (hexLen >= 19) {
+        Serial.printf("[LIDAR SETTINGS] Byte 18 (upload interval): %d -> %dms\n",
+                       hexBuf[18], hexBuf[18] * 100);
+    }
+}
+//end of temporary function.
 
 // Non-blocking — call every loop() pass. Updates lastDistanceMm
 // whenever a complete, validated 9-byte frame has arrived.
@@ -464,7 +513,7 @@ void setup() {
 
     Serial2.begin(LIDAR_BAUD, SERIAL_8N1, PIN_LIDAR_RX, PIN_LIDAR_TX);
     initLidar();
-
+    readLidarSettings(); //delete this after using it.
     connectWiFi();
 
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
